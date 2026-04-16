@@ -6,52 +6,24 @@
     <title>Пульт Игрока - Угадай Мелодию</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        body { 
-            background: #0d0d0d; 
-            background-image: linear-gradient(#1a1a1a 1px, transparent 1px);
-            background-size: 100% 24px;
-            color: white; 
-            font-family: 'Segoe UI', sans-serif; 
-            display: flex; 
-            flex-direction: column; 
-            align-items: center; 
-            justify-content: center; 
-            height: 100vh; 
-            margin: 0; 
-            touch-action: manipulation;
-        }
+        body { background: #0d0d0d; background-image: linear-gradient(#1a1a1a 1px, transparent 1px); background-size: 100% 24px; color: white; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; touch-action: manipulation; }
         .container { text-align: center; width: 90%; }
-        input { 
-            background: #2a2a2a; border: 2px solid #444; color: white; 
-            padding: 15px; border-radius: 10px; margin: 10px 0; width: 80%; font-size: 18px; 
-            text-align: center; text-transform: uppercase;
-        }
-        #buzz-btn { 
-            width: 250px; height: 250px; border-radius: 50%; 
-            background: radial-gradient(circle, #ff4d5a 0%, #e63946 100%); 
-            border: 10px solid #941b24; color: white; font-size: 35px; font-weight: bold; 
-            cursor: pointer; display: none; margin: 20px auto;
-            box-shadow: 0 15px 0 #601219, 0 20px 30px rgba(230, 57, 70, 0.4);
-            transition: 0.1s;
-        }
-        #buzz-btn:active { 
-            transform: translateY(10px); 
-            box-shadow: 0 5px 0 #601219, 0 10px 20px rgba(230, 57, 70, 0.4); 
-        }
+        input { background: #2a2a2a; border: 2px solid #444; color: white; padding: 15px; border-radius: 10px; margin: 10px 0; width: 80%; font-size: 18px; text-align: center; }
+        #buzz-btn { width: 250px; height: 250px; border-radius: 50%; background: radial-gradient(circle, #ff4d5a 0%, #e63946 100%); border: 10px solid #941b24; color: white; font-size: 35px; font-weight: bold; cursor: pointer; display: none; margin: 20px auto; box-shadow: 0 15px 0 #601219, 0 20px 30px rgba(230, 57, 70, 0.4); transition: 0.1s; }
+        #buzz-btn:active { transform: translateY(10px); box-shadow: 0 5px 0 #601219, 0 10px 20px rgba(230, 57, 70, 0.4); }
         #status { margin-top: 15px; font-size: 14px; color: #888; }
-        button#connect-btn { 
-            background: #4caf50; color: white; border: none; padding: 15px 30px; 
-            font-size: 20px; border-radius: 10px; font-weight: bold; width: 85%;
-        }
+        button#connect-btn { background: #4caf50; color: white; border: none; padding: 15px 30px; font-size: 20px; border-radius: 10px; font-weight: bold; width: 85%; cursor: pointer; }
+        .file-label { display: block; margin: 10px 0; color: #aaa; font-size: 14px; }
     </style>
 </head>
 <body>
 
 <div class="container" id="setup">
-    <h2 style="color:#e63946">ПОДКЛЮЧЕНИЕ</h2>
-    <input type="text" id="game-id" placeholder="ID игры (4 буквы)">
-    <input type="number" id="p-idx" placeholder="Твой номер (1, 2, 3...)">
-    <p style="font-size: 12px; color: #666;">Номер должен совпадать с твоим местом в списке</p>
+    <h2 style="color:#e63946">РЕГИСТРАЦИЯ</h2>
+    <input type="text" id="game-id" placeholder="ID игры (4 буквы)" style="text-transform: uppercase;">
+    <input type="text" id="p-name" placeholder="Твоё Имя">
+    <label class="file-label">Твоё фото (необязательно):</label>
+    <input type="file" id="p-avatar" accept="image/*">
     <button id="connect-btn" onclick="connectToGame()">ВСТУПИТЬ В ИГРУ</button>
     <div id="status">Ожидание ввода...</div>
 </div>
@@ -60,79 +32,58 @@
 <div id="active-status" style="display:none; margin-top:20px; color: #888;">Вы в игре!</div>
 
 <script>
-    let peer, conn;
+    let peer, conn, pImageData = null;
+
+    // Чтение картинки в Base64
+    document.getElementById('p-avatar').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => { pImageData = event.target.result; };
+            reader.readAsDataURL(file);
+        }
+    });
 
     function connectToGame() {
         const gameId = document.getElementById('game-id').value.trim().toUpperCase();
-        const pIdx = document.getElementById('p-idx').value;
+        const pName = document.getElementById('p-name').value.trim();
         const status = document.getElementById('status');
+        if (!gameId || !pName) { status.innerText = "Введи ID и Имя!"; return; }
 
-        if (!gameId || !pIdx) {
-            status.innerText = "Введи ID и свой номер!";
-            return;
-        }
+        status.innerText = "Подключение...";
+        const config = {
+            host: '0.peerjs.com', port: 443, secure: true,
+            config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] }
+        };
 
-        status.innerText = "Установка связи с сервером...";
+        if (peer) peer.destroy();
+        peer = new Peer(config);
         
-        // Добавляем конфигурацию со STUN-серверами Google для работы через интернет
-        peer = new Peer({
-            config: {
-                'iceServers': [
-                    { url: 'stun:stun.l.google.com:19302' },
-                    { url: 'stun:stun1.l.google.com:19302' }
-                ]
-            }
-        });
-        
-        peer.on('open', (id) => {
-            status.innerText = "Поиск игры " + gameId + "...";
-            conn = peer.connect(gameId, {
-                reliable: true
-            });
-            
+        peer.on('open', () => {
+            status.innerText = "Ищем игру " + gameId + "...";
+            conn = peer.connect(gameId, { reliable: true });
             conn.on('open', () => {
+                // Отправляем данные игрока при подключении
+                conn.send({ action: 'REGISTER', name: pName, img: pImageData });
+                status.innerText = "Готово!";
                 document.getElementById('setup').style.display = 'none';
                 document.getElementById('buzz-btn').style.display = 'block';
                 document.getElementById('active-status').style.display = 'block';
+                document.getElementById('active-status').innerText = "Вы в игре как: " + pName;
             });
-
-            conn.on('error', (err) => {
-                status.innerText = "Ошибка соединения: " + err;
-            });
-            
-            // Если через 5 секунд не подключились, вероятно, ID неверный
-            setTimeout(() => {
-                if (!conn.open) {
-                    status.innerText = "Не удалось найти игру. Проверь ID.";
-                }
-            }, 5000);
+            conn.on('error', (err) => { status.innerText = "Ошибка: " + err; });
         });
-
-        peer.on('error', (err) => {
-            console.error(err);
-            if (err.type === 'browser-incompatible') {
-                status.innerText = "Браузер не поддерживается.";
-            } else {
-                status.innerText = "Ошибка сети: " + err.type;
-            }
-        });
+        peer.on('error', (err) => { status.innerText = "Ошибка сети: " + err.type; });
     }
 
     function sendBuzz() {
         if (conn && conn.open) {
-            const idx = parseInt(document.getElementById('p-idx').value) - 1;
-            conn.send({ action: 'BUZZ', playerIdx: idx });
-            
+            conn.send({ action: 'BUZZ' }); // Просто сигнал, сервер узнает нас по соединению
             const btn = document.getElementById('buzz-btn');
-            btn.style.background = "#ffeb3b";
-            btn.style.color = "#000";
-            setTimeout(() => {
-                btn.style.background = "";
-                btn.style.color = "";
-            }, 500);
+            btn.style.background = "#ffeb3b"; btn.style.color = "#000";
+            setTimeout(() => { btn.style.background = ""; btn.style.color = ""; }, 500);
         } else {
-            alert("Соединение потеряно. Перезагрузите страницу.");
-            location.reload();
+            alert("Связь потеряна. Перезагрузите."); location.reload();
         }
     }
 </script>
