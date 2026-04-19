@@ -34,7 +34,6 @@
 <script>
     let peer, conn, pImageData = null;
 
-    // Чтение картинки в Base64
     document.getElementById('p-avatar').addEventListener('change', function(e) {
         const file = e.target.files[0];
         if (file) {
@@ -50,20 +49,22 @@
         const status = document.getElementById('status');
         if (!gameId || !pName) { status.innerText = "Введи ID и Имя!"; return; }
 
-        status.innerText = "Подключение...";
+        status.innerText = "Подключение к сети...";
         const config = {
             host: '0.peerjs.com', port: 443, secure: true,
             config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] }
         };
 
         if (peer) peer.destroy();
+        // СОЗДАЕМ ИГРОКА СО СЛУЧАЙНЫМ ID (НЕ gameId)
         peer = new Peer(config);
         
-        peer.on('open', () => {
-            status.innerText = "Ищем игру " + gameId + "...";
+        peer.on('open', (id) => {
+            status.innerText = "Поиск игры " + gameId + "...";
+            // ТЕПЕРЬ ПОДКЛЮЧАЕМСЯ К gameId ВЕДУЩЕГО
             conn = peer.connect(gameId, { reliable: true });
+            
             conn.on('open', () => {
-                // Отправляем данные игрока при подключении
                 conn.send({ action: 'REGISTER', name: pName, img: pImageData });
                 status.innerText = "Готово!";
                 document.getElementById('setup').style.display = 'none';
@@ -71,14 +72,22 @@
                 document.getElementById('active-status').style.display = 'block';
                 document.getElementById('active-status').innerText = "Вы в игре как: " + pName;
             });
+
             conn.on('error', (err) => { status.innerText = "Ошибка: " + err; });
         });
-        peer.on('error', (err) => { status.innerText = "Ошибка сети: " + err.type; });
+
+        peer.on('error', (err) => { 
+            if(err.type === 'peer-unavailable') {
+                status.innerText = "ID игры " + gameId + " не найден.";
+            } else {
+                status.innerText = "Ошибка сети: " + err.type; 
+            }
+        });
     }
 
     function sendBuzz() {
         if (conn && conn.open) {
-            conn.send({ action: 'BUZZ' }); // Просто сигнал, сервер узнает нас по соединению
+            conn.send({ action: 'BUZZ' });
             const btn = document.getElementById('buzz-btn');
             btn.style.background = "#ffeb3b"; btn.style.color = "#000";
             setTimeout(() => { btn.style.background = ""; btn.style.color = ""; }, 500);
