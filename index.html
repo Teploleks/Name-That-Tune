@@ -40,7 +40,6 @@
         .p-avatar-wrap { width: 110px; height: 110px; border-radius: 50%; border: 4px solid #444; overflow: hidden; background: #222; display: flex; align-items: center; justify-content: center; margin-bottom: 12px; transition: 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); position: relative; }
         @keyframes gold-pulse { 0% { box-shadow: 0 0 15px #fff, 0 0 30px var(--gold), 0 0 45px var(--gold), 0 0 60px #ff9f43; } 50% { box-shadow: 0 0 20px #fff, 0 0 40px var(--gold), 0 0 60px var(--gold), 0 0 80px #ff9f43; } 100% { box-shadow: 0 0 15px #fff, 0 0 30px var(--gold), 0 0 45px var(--gold), 0 0 60px #ff9f43; } }
         .p-card.buzzed .p-avatar-wrap { border-color: var(--gold); transform: scale(1.1); animation: gold-pulse 1.5s infinite; }
-        .p-avatar { width: 100%; height: 100%; object-fit: cover; }
         .score-container { border: 2px solid #444; background: rgba(0,0,0,0.4); border-radius: 10px; width: 140px; overflow: hidden; }
         .score-input { background: transparent; border: none; color: var(--gold); font-size: 38px; font-weight: bold; width: 100%; text-align: center; outline: none; padding: 5px 0; }
         .auction-box { background: rgba(30,30,30,0.9); border: 3px solid var(--red); border-radius: 25px; padding: 40px; min-width: 550px; text-align: center; }
@@ -71,7 +70,6 @@
         <h1>Панель Ведущего</h1>
         <div class="tab-content">
             <h3>1. Участники</h3>
-            <p style="font-size: 14px; color: #aaa;">Игроки с пультами появятся здесь автоматически после подключения.</p>
             <div id="p-setup-area" style="display:flex; flex-wrap:wrap; gap:15px; margin-top:15px;"></div>
         </div>
         <div class="tab-content">
@@ -154,10 +152,8 @@
     function initNetworking() {
         const sid = Math.random().toString(36).substr(2, 4).toUpperCase();
         peer = new Peer(sid, { 
-            host: '0.peerjs.com', 
-            port: 443, 
-            secure: true,
-            config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] }
+            host: '0.peerjs.com', port: 443, secure: true, debug: 1,
+            config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
         });
         
         peer.on('open', id => { 
@@ -181,8 +177,9 @@
                 }
             });
         });
-        
-        peer.on('error', err => console.error("PeerJS Error:", err));
+
+        peer.on('disconnected', () => { peer.reconnect(); });
+        peer.on('error', err => console.error("Peer Error:", err));
     }
 
     function playBuzzSound() {
@@ -257,7 +254,7 @@
             let av = p.img ? `<img src="${p.img}" class="p-avatar">` : placeholderSVG;
             b.innerHTML += `<div class="p-card">
                 <div class="p-avatar-wrap">${av}</div>
-                <div style="font-weight:bold; margin-bottom:5px; text-align:center; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.name}</div>
+                <div style="font-weight:bold; margin-bottom:5px;">${p.name}</div>
                 <div class="score-container"><input type="number" class="score-input" value="${p.score}" onchange="players[${i}].score=parseInt(this.value)"></div>
             </div>`;
         });
@@ -311,39 +308,29 @@
     function revealR2Title() { if(currentAudio) currentAudio.pause(); document.getElementById('r2-answer').style.display = 'block'; }
 
     function buildR3Menu() {
-        const area = document.getElementById('r3-admin-playlist'); area.innerHTML = '<h3>Список для финала:</h3>';
+        const area = document.getElementById('r3-admin-playlist'); area.innerHTML = '<h3>Финал:</h3>';
         r3Data.forEach((item, i) => {
             let div = document.createElement('div'); div.className = "r3-list-item";
-            div.style.cursor="pointer"; div.style.padding="10px"; div.style.borderBottom="1px solid #333"; div.style.background = "#1a1a1a";
-            div.innerHTML = `<span>Мелодия №${i+1}: <strong>${item.title}</strong></span>`;
+            div.style.cursor="pointer"; div.style.padding="10px"; div.style.borderBottom="1px solid #333";
+            div.innerHTML = `Мелодия №${i+1}: <strong>${item.title}</strong>`;
             div.onclick = () => selectR3Melody(i);
             area.appendChild(div);
         });
     }
 
     function selectR3Melody(i) {
-        if (i < 0 || i >= r3Data.length) {
-             document.getElementById('r3-play-btn').style.opacity = "0.3";
-             document.getElementById('r3-hint-display').innerText = "Финал окончен!";
-             r3ActiveIdx = -1;
-             return;
-        }
-        r3ActiveIdx = i;
-        r3Bid = 7; document.getElementById('r3-bid').innerText = 7;
+        if (i < 0 || i >= r3Data.length) { r3ActiveIdx = -1; return; }
+        r3ActiveIdx = i; r3Bid = 7; document.getElementById('r3-bid').innerText = 7;
         document.getElementById('r3-hint-display').innerText = r3Data[i].hint;
         document.getElementById('r3-answer').style.display = 'none';
-        document.getElementById('r3-play-btn').style.opacity = "1";
     }
 
     function changeR3Bid(v) { r3Bid = Math.max(1, r3Bid + v); document.getElementById('r3-bid').innerText = r3Bid; }
     function playR3Song() {
         if(r3ActiveIdx === -1) return;
-        const song = r3Data[r3ActiveIdx];
-        if(!song.file) return;
-        if(currentAudio) currentAudio.pause();
-        resetBuzzer();
-        currentAudio = new Audio(song.file);
-        currentAudio.play();
+        const song = r3Data[r3ActiveIdx]; if(!song.file) return;
+        if(currentAudio) currentAudio.pause(); resetBuzzer();
+        currentAudio = new Audio(song.file); currentAudio.play();
         setTimeout(() => { if(currentAudio) currentAudio.pause(); }, r3Bid * 1000);
     }
 
