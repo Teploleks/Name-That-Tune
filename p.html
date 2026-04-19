@@ -3,57 +3,88 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Пульт</title>
-    <script src="peerjs.min.js"></script>
+    <title>Пульт Игрока</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        body { background: #0d0d0d; color: white; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .container { text-align: center; width: 80%; }
-        input { padding: 15px; width: 100%; box-sizing: border-box; margin: 10px 0; border-radius: 10px; border: none; font-size: 18px; }
-        #buzz-btn { width: 200px; height: 200px; border-radius: 50%; background: #e63946; border: 10px solid #941b24; color: white; font-size: 30px; font-weight: bold; display: none; margin: 20px auto; }
-        #status { color: #888; font-size: 14px; margin-top: 10px; }
+        body { background: #0d0d0d; color: white; font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; touch-action: manipulation; }
+        .container { text-align: center; width: 85%; max-width: 400px; }
+        input { background: #2a2a2a; border: 2px solid #444; color: white; padding: 15px; border-radius: 10px; margin: 10px 0; width: 100%; box-sizing: border-box; font-size: 16px; text-align: center; }
+        .file-label { display: block; margin-top: 10px; color: #aaa; font-size: 14px; text-align: left; padding-left: 5px; }
+        #buzz-btn { width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle, #ff4d5a 0%, #e63946 100%); border: 8px solid #941b24; color: white; font-size: 30px; font-weight: bold; cursor: pointer; display: none; margin: 20px auto; box-shadow: 0 10px 0 #601219; transition: 0.1s; }
+        #buzz-btn:active { transform: translateY(6px); box-shadow: 0 4px 0 #601219; }
+        #status { margin-top: 15px; font-size: 14px; color: #888; }
+        button#connect-btn { background: #2ecc71; color: white; border: none; padding: 15px; font-size: 18px; border-radius: 10px; font-weight: bold; width: 100%; cursor: pointer; margin-top: 10px; }
     </style>
 </head>
 <body>
 
-<div id="setup" class="container">
-    <h2>ВХОД В ИГРУ</h2>
+<div class="container" id="setup">
+    <h2 style="color:#e63946; margin-bottom: 20px;">РЕГИСТРАЦИЯ</h2>
     <input type="text" id="game-id" placeholder="ID ИГРЫ (4 БУКВЫ)" maxlength="4" style="text-transform: uppercase;">
     <input type="text" id="p-name" placeholder="ВАШЕ ИМЯ">
-    <button onclick="connect()" style="padding: 15px 30px; background: #2ecc71; color: white; border: none; border-radius: 10px; font-weight: bold; width: 100%;">ПОДКЛЮЧИТЬСЯ</button>
-    <div id="status">Готов</div>
+    
+    <label class="file-label">Ваше фото (необязательно):</label>
+    <input type="file" id="p-avatar" accept="image/*">
+    
+    <button id="connect-btn" onclick="connectToGame()">ВСТУПИТЬ В ИГРУ</button>
+    <div id="status">Готов к подключению</div>
 </div>
 
 <button id="buzz-btn" onclick="sendBuzz()">ЖМИ!</button>
 
 <script>
-    let peer, conn;
+    let peer = null, conn = null, pImageData = null;
 
-    function connect() {
-        const gid = document.getElementById('game-id').value.toUpperCase();
-        const name = document.getElementById('p-name').value;
+    // Обработка загрузки фото
+    document.getElementById('p-avatar').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                // Сжимаем картинку, чтобы не перегружать сеть
+                pImageData = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    function connectToGame() {
+        const gameId = document.getElementById('game-id').value.trim().toUpperCase();
+        const pName = document.getElementById('p-name').value.trim();
         const status = document.getElementById('status');
 
-        if (!gid || !name) return alert("Заполни все поля!");
+        if (!gameId || !pName) {
+            alert("Введите ID игры и ваше имя!");
+            return;
+        }
 
         status.innerText = "Подключение к сети...";
         peer = new Peer({ host: '0.peerjs.com', port: 443, secure: true });
-
+        
         peer.on('open', () => {
-            status.innerText = "Ищу игру " + gid + "...";
-            conn = peer.connect(gid);
+            status.innerText = "Поиск игры " + gameId + "...";
+            conn = peer.connect(gameId, { reliable: true });
             
             conn.on('open', () => {
-                conn.send({ action: 'REGISTER', name: name });
+                // Отправляем имя и фото ведущему
+                conn.send({ 
+                    action: 'REGISTER', 
+                    name: pName, 
+                    img: pImageData 
+                });
+                
+                status.innerText = "Успешно!";
                 document.getElementById('setup').style.display = 'none';
                 document.getElementById('buzz-btn').style.display = 'block';
             });
 
-            conn.on('error', (err) => { status.innerText = "Ошибка: " + err; });
+            conn.on('error', (err) => { 
+                status.innerText = "Ошибка: " + err; 
+            });
         });
 
-        peer.on('error', (err) => { 
+        peer.on('error', (err) => {
             status.innerText = "Ошибка сети: " + err.type;
-            console.error(err);
         });
     }
 
@@ -62,7 +93,9 @@
             conn.send({ action: 'BUZZ' });
             const btn = document.getElementById('buzz-btn');
             btn.style.background = "#ffeb3b";
-            setTimeout(() => btn.style.background = "#e63946", 200);
+            setTimeout(() => { btn.style.background = ""; }, 200);
+        } else {
+            alert("Связь потеряна. Обновите страницу.");
         }
     }
 </script>
