@@ -32,7 +32,7 @@
 <div id="active-status" style="display:none; margin-top:20px; color: #888;">Вы в игре!</div>
 
 <script>
-    let peer, conn, pImageData = null;
+    let peer = null, conn = null, pImageData = null;
 
     document.getElementById('p-avatar').addEventListener('change', function(e) {
         const file = e.target.files[0];
@@ -51,17 +51,15 @@
 
         status.innerText = "Подключение к сети...";
         const config = {
-            host: '0.peerjs.com', port: 443, secure: true,
-            config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] }
+            host: '0.peerjs.com', port: 443, secure: true, debug: 1,
+            config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
         };
 
         if (peer) peer.destroy();
-        // СОЗДАЕМ ИГРОКА СО СЛУЧАЙНЫМ ID (НЕ gameId)
         peer = new Peer(config);
         
-        peer.on('open', (id) => {
-            status.innerText = "Поиск игры " + gameId + "...";
-            // ТЕПЕРЬ ПОДКЛЮЧАЕМСЯ К gameId ВЕДУЩЕГО
+        peer.on('open', (myId) => {
+            status.innerText = "Подключаемся к " + gameId + "...";
             conn = peer.connect(gameId, { reliable: true });
             
             conn.on('open', () => {
@@ -74,14 +72,12 @@
             });
 
             conn.on('error', (err) => { status.innerText = "Ошибка: " + err; });
+            conn.on('close', () => { status.innerText = "Связь потеряна. Обновите страницу."; });
         });
 
+        peer.on('disconnected', () => { peer.reconnect(); });
         peer.on('error', (err) => { 
-            if(err.type === 'peer-unavailable') {
-                status.innerText = "ID игры " + gameId + " не найден.";
-            } else {
-                status.innerText = "Ошибка сети: " + err.type; 
-            }
+            status.innerText = "Ошибка сети: " + err.type;
         });
     }
 
@@ -90,9 +86,10 @@
             conn.send({ action: 'BUZZ' });
             const btn = document.getElementById('buzz-btn');
             btn.style.background = "#ffeb3b"; btn.style.color = "#000";
-            setTimeout(() => { btn.style.background = ""; btn.style.color = ""; }, 500);
+            setTimeout(() => { btn.style.background = ""; btn.style.color = ""; }, 300);
         } else {
-            alert("Связь потеряна. Перезагрузите."); location.reload();
+            alert("Соединение разорвано. Переподключаюсь...");
+            connectToGame();
         }
     }
 </script>
