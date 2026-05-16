@@ -8,19 +8,26 @@
     <style>
         body { background: #0d0d0d; background-image: linear-gradient(#1a1a1a 1px, transparent 1px); background-size: 100% 24px; color: white; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; touch-action: manipulation; }
         .container { text-align: center; width: 90%; }
-        input { background: #2a2a2a; border: 2px solid #444; color: white; padding: 15px; border-radius: 10px; margin: 10px 0; width: 80%; font-size: 18px; text-align: center; }
-        #buzz-btn { width: 250px; height: 250px; border-radius: 50%; background: radial-gradient(circle, #ff4d5a 0%, #e63946 100%); border: 10px solid #941b24; color: white; font-size: 35px; font-weight: bold; cursor: pointer; display: none; margin: 20px auto; box-shadow: 0 15px 0 #601219, 0 20px 30px rgba(230, 57, 70, 0.4); transition: 0.1s; }
-        #buzz-btn:active { transform: translateY(10px); box-shadow: 0 5px 0 #601219, 0 10px 20px rgba(230, 57, 70, 0.4); }
-        #status { margin-top: 15px; font-size: 14px; color: #888; }
+        input[type="text"] { background: #2a2a2a; border: 2px solid #444; color: white; padding: 15px; border-radius: 10px; margin: 10px 0; width: 80%; font-size: 18px; text-align: center; display: block; margin-left: auto; margin-right: auto; box-sizing: border-box; }
+        input[type="file"] { background: #2a2a2a; border: 2px solid #444; color: #aaa; padding: 10px; border-radius: 10px; margin: 10px 0; width: 80%; font-size: 14px; display: block; margin-left: auto; margin-right: auto; box-sizing: border-box; }
+        #buzz-btn { width: 250px; height: 250px; border-radius: 50%; background: radial-gradient(circle, #ff4d5a 0%, #e63946 100%); border: 10px solid #941b24; color: white; font-size: 35px; font-weight: bold; cursor: pointer; display: none; margin: 20px auto; box-shadow: 0 15px 0 #601219, 0 20px 30px rgba(230,57,70,0.4); transition: 0.1s; -webkit-tap-highlight-color: transparent; }
+        #buzz-btn:active { transform: translateY(10px); box-shadow: 0 5px 0 #601219, 0 10px 20px rgba(230,57,70,0.4); }
+        #buzz-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+        #status { margin-top: 15px; font-size: 14px; color: #888; min-height: 20px; }
         button#connect-btn { background: #4caf50; color: white; border: none; padding: 15px 30px; font-size: 20px; border-radius: 10px; font-weight: bold; width: 85%; cursor: pointer; }
-        .file-label { display: block; margin: 10px 0; color: #aaa; font-size: 14px; }
+        button#connect-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .file-label { display: block; margin: 10px 0 4px 0; color: #aaa; font-size: 14px; }
+        #active-status { display: none; margin-top: 20px; font-size: 18px; color: #2ecc71; font-weight: bold; }
+        #conn-dot { width: 10px; height: 10px; border-radius: 50%; background: #e63946; display: inline-block; margin-right: 6px; vertical-align: middle; transition: background 0.3s; }
+        #conn-dot.online { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
+        #reconnect-notice { display: none; color: #ffeb3b; font-size: 13px; margin-top: 8px; }
     </style>
 </head>
 <body>
 
 <div class="container" id="setup">
     <h2 style="color:#e63946">РЕГИСТРАЦИЯ</h2>
-    <input type="text" id="game-id" placeholder="ID игры (4 буквы)" style="text-transform: uppercase;">
+    <input type="text" id="game-id" placeholder="ID игры (4 буквы)" maxlength="4" style="text-transform:uppercase;">
     <input type="text" id="p-name" placeholder="Твоё Имя">
     <label class="file-label">Твоё фото (необязательно):</label>
     <input type="file" id="p-avatar" accept="image/*">
@@ -29,61 +36,179 @@
 </div>
 
 <button id="buzz-btn" onclick="sendBuzz()">ЖМИ!</button>
-<div id="active-status" style="display:none; margin-top:20px; color: #888;">Вы в игре!</div>
+<div id="active-status">
+    <span id="conn-dot"></span><span id="active-label">Вы в игре!</span>
+</div>
+<div id="reconnect-notice">🔄 Восстанавливаем связь...</div>
 
 <script>
     let peer, conn, pImageData = null;
+    let currentGameId = '', currentName = '';
+    let reconnectTimer = null, reconnectAttempts = 0;
+    const MAX_RECONNECT = 10;
 
-    // Чтение картинки в Base64
+    // Те же ICE серверы, что и у ведущего
+    const ICE_CONFIG = {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            { urls: 'stun:stun.relay.metered.ca:80' },
+            { urls: 'turn:a.relay.metered.ca:80',   username: 'open', credential: 'open' },
+            { urls: 'turn:a.relay.metered.ca:443',  username: 'open', credential: 'open' },
+            { urls: 'turns:a.relay.metered.ca:443', username: 'open', credential: 'open' }
+        ]
+    };
+
+    document.getElementById('game-id').addEventListener('input', function() {
+        this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+
     document.getElementById('p-avatar').addEventListener('change', function(e) {
         const file = e.target.files[0];
         if (file) {
+            // Сжимаем картинку перед отправкой (лимит ~200кб)
+            const img = new Image();
             const reader = new FileReader();
-            reader.onload = (event) => { pImageData = event.target.result; };
+            reader.onload = ev => {
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const MAX = 200;
+                    let w = img.width, h = img.height;
+                    if (w > h) { if (w > MAX) { h = h * MAX / w; w = MAX; } }
+                    else { if (h > MAX) { w = w * MAX / h; h = MAX; } }
+                    canvas.width = w; canvas.height = h;
+                    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                    pImageData = canvas.toDataURL('image/jpeg', 0.7);
+                };
+                img.src = ev.target.result;
+            };
             reader.readAsDataURL(file);
         }
     });
 
+    function setStatus(text, color) {
+        const el = document.getElementById('status');
+        el.innerText = text;
+        el.style.color = color || '#888';
+    }
+
+    function setConnected(name) {
+        document.getElementById('setup').style.display = 'none';
+        document.getElementById('buzz-btn').style.display = 'block';
+        document.getElementById('active-status').style.display = 'block';
+        document.getElementById('active-label').innerText = 'Вы в игре как: ' + name;
+        document.getElementById('conn-dot').className = 'online';
+        document.getElementById('reconnect-notice').style.display = 'none';
+        document.getElementById('buzz-btn').disabled = false;
+        reconnectAttempts = 0;
+    }
+
+    function setDisconnected() {
+        document.getElementById('conn-dot').className = '';
+        document.getElementById('buzz-btn').disabled = true;
+        document.getElementById('reconnect-notice').style.display = 'block';
+    }
+
     function connectToGame() {
-        const gameId = document.getElementById('game-id').value.trim().toUpperCase();
-        const pName = document.getElementById('p-name').value.trim();
-        const status = document.getElementById('status');
-        if (!gameId || !pName) { status.innerText = "Введи ID и Имя!"; return; }
+        currentGameId = document.getElementById('game-id').value.trim().toUpperCase();
+        currentName = document.getElementById('p-name').value.trim();
+        if (!currentGameId || !currentName) { setStatus('Введи ID и Имя!', '#e63946'); return; }
 
-        status.innerText = "Подключение...";
-        const config = {
+        document.getElementById('connect-btn').disabled = true;
+        setStatus('Подключение...');
+        doConnect();
+    }
+
+    function doConnect() {
+        if (peer && !peer.destroyed) { peer.destroy(); }
+
+        peer = new Peer({
             host: '0.peerjs.com', port: 443, secure: true,
-            config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] }
-        };
-
-        if (peer) peer.destroy();
-        peer = new Peer(config);
-        
-        peer.on('open', () => {
-            status.innerText = "Ищем игру " + gameId + "...";
-            conn = peer.connect(gameId, { reliable: true });
-            conn.on('open', () => {
-                // Отправляем данные игрока при подключении
-                conn.send({ action: 'REGISTER', name: pName, img: pImageData });
-                status.innerText = "Готово!";
-                document.getElementById('setup').style.display = 'none';
-                document.getElementById('buzz-btn').style.display = 'block';
-                document.getElementById('active-status').style.display = 'block';
-                document.getElementById('active-status').innerText = "Вы в игре как: " + pName;
-            });
-            conn.on('error', (err) => { status.innerText = "Ошибка: " + err; });
+            config: ICE_CONFIG,
+            debug: 0
         });
-        peer.on('error', (err) => { status.innerText = "Ошибка сети: " + err.type; });
+
+        const timeout = setTimeout(() => {
+            if (!conn || !conn.open) {
+                setStatus('Время вышло. Повторяем...', '#ffeb3b');
+                scheduleReconnect();
+            }
+        }, 12000);
+
+        peer.on('open', () => {
+            clearTimeout(timeout);
+            setStatus('Ищем игру ' + currentGameId + '...');
+            conn = peer.connect(currentGameId, { reliable: true });
+            setupConn();
+        });
+
+        peer.on('error', err => {
+            clearTimeout(timeout);
+            console.error('Peer error:', err.type);
+            const msgs = {
+                'peer-unavailable': 'Игра не найдена. Проверь ID.',
+                'network': 'Нет сети. Проверяем...',
+                'server-error': 'Ошибка сервера. Повторяем...',
+                'socket-error': 'Ошибка сокета. Повторяем...',
+                'socket-closed': 'Соединение прервано. Повторяем...'
+            };
+            const isRetryable = ['network','server-error','socket-error','socket-closed'].includes(err.type);
+            setStatus(msgs[err.type] || 'Ошибка: ' + err.type, isRetryable ? '#ffeb3b' : '#e63946');
+            if (isRetryable) scheduleReconnect();
+            else document.getElementById('connect-btn').disabled = false;
+        });
+
+        peer.on('disconnected', () => {
+            setDisconnected();
+            scheduleReconnect();
+        });
+    }
+
+    function setupConn() {
+        conn.on('open', () => {
+            conn.send({ action: 'REGISTER', name: currentName, img: pImageData });
+            setConnected(currentName);
+        });
+
+        conn.on('close', () => {
+            setDisconnected();
+            scheduleReconnect();
+        });
+
+        conn.on('error', err => {
+            console.error('Conn error:', err);
+            setDisconnected();
+            scheduleReconnect();
+        });
+    }
+
+    function scheduleReconnect() {
+        clearTimeout(reconnectTimer);
+        if (reconnectAttempts >= MAX_RECONNECT) {
+            setStatus('Не удалось подключиться. Обновите страницу.', '#e63946');
+            document.getElementById('reconnect-notice').style.display = 'none';
+            document.getElementById('connect-btn').disabled = false;
+            document.getElementById('setup').style.display = 'block';
+            return;
+        }
+        reconnectAttempts++;
+        const delay = Math.min(2000 * reconnectAttempts, 15000); // экспоненциальный backoff
+        document.getElementById('reconnect-notice').style.display = 'block';
+        document.getElementById('reconnect-notice').innerText = `🔄 Попытка ${reconnectAttempts}/${MAX_RECONNECT} через ${delay/1000}с...`;
+        reconnectTimer = setTimeout(doConnect, delay);
     }
 
     function sendBuzz() {
         if (conn && conn.open) {
-            conn.send({ action: 'BUZZ' }); // Просто сигнал, сервер узнает нас по соединению
+            conn.send({ action: 'BUZZ' });
             const btn = document.getElementById('buzz-btn');
-            btn.style.background = "#ffeb3b"; btn.style.color = "#000";
-            setTimeout(() => { btn.style.background = ""; btn.style.color = ""; }, 500);
+            btn.style.background = 'radial-gradient(circle, #ffeb3b 0%, #f39c12 100%)';
+            btn.style.color = '#000';
+            setTimeout(() => { btn.style.background = ''; btn.style.color = ''; }, 500);
         } else {
-            alert("Связь потеряна. Перезагрузите."); location.reload();
+            setDisconnected();
+            scheduleReconnect();
         }
     }
 </script>
