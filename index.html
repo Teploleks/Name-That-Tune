@@ -16,7 +16,10 @@
         .dev-mark { position: fixed; bottom: 10px; right: 15px; font-size: 12px; color: #444; z-index: 500; font-family: monospace; }
 
         #settings-trigger { position: fixed; top: 15px; right: 15px; z-index: 1000; background: #333; border: 1px solid #444; color: white; padding: 10px 15px; border-radius: 8px; cursor: pointer; opacity: 0.8; }
-        #network-status { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.9); padding: 15px; border-radius: 15px; border: 2px solid #444; display: flex; align-items: center; gap: 20px; z-index: 1001; cursor: move; user-select: none; width: fit-content; height: fit-content; resize: none; overflow: hidden; }
+        #network-status { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.9); padding: 15px; border-radius: 15px; border: 2px solid #444; display: flex; align-items: center; gap: 20px; z-index: 1001; cursor: move; user-select: none; width: fit-content; }
+        #peer-indicator { width: 12px; height: 12px; border-radius: 50%; background: #888; flex-shrink: 0; }
+        #peer-indicator.ok { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+        #peer-indicator.err { background: #e63946; box-shadow: 0 0 8px #e63946; }
         
         .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--overlay); z-index: 999; display: flex; justify-content: center; overflow-y: auto; padding: 40px; box-sizing: border-box; }
         .admin-panel { background: #1a1a1a; padding: 40px; border-radius: 20px; width: 100%; max-width: 1400px; border: 2px solid var(--red); height: fit-content; }
@@ -60,6 +63,9 @@
             transform: scale(1.1);
             animation: gold-pulse 1.5s infinite;
         }
+        .p-card.offline .p-avatar-wrap { opacity: 0.4; filter: grayscale(1); }
+        .p-card .conn-dot { width: 10px; height: 10px; border-radius: 50%; background: #2ecc71; margin-bottom: 4px; }
+        .p-card.offline .conn-dot { background: #e63946; }
 
         .p-avatar { width: 100%; height: 100%; object-fit: cover; }
         
@@ -86,6 +92,7 @@
 <button id="settings-trigger" onclick="toggleAdmin()">⚙ НАСТРОЙКИ</button>
 
 <div id="network-status">
+    <div id="peer-indicator"></div>
     <div id="qrcode"></div>
     <div id="display-id" style="color:var(--gold); font-family:monospace; font-size:24px; font-weight:bold;">---</div>
 </div>
@@ -176,110 +183,175 @@
     let players = [], r1Data = [], r2Data = [], r3Data = [], currentAudio = null;
     let r2Interval, r2PointsInterval, r3Bid = 7, r3ActiveIdx = -1, peer;
     const placeholderSVG = `<svg viewBox="0 0 24 24" fill="white" width="60" height="60" style="opacity:0.3"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>`;
-
     let audioCtx = null;
+    const connections = {}; // connId -> DataConnection
 
+    // ── ICE / STUN конфиг с несколькими серверами ──────────────────────────
+    const ICE_CONFIG = {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            { urls: 'stun:stun.relay.metered.ca:80' },
+            // Бесплатный TURN от Metered (помогает при строгом NAT)
+            { urls: 'turn:a.relay.metered.ca:80',    username: 'open', credential: 'open' },
+            { urls: 'turn:a.relay.metered.ca:443',   username: 'open', credential: 'open' },
+            { urls: 'turns:a.relay.metered.ca:443',  username: 'open', credential: 'open' }
+        ]
+    };
+
+    // ── Перетаскивание статус-панели ────────────────────────────────────────
     const dragPanel = document.getElementById('network-status');
     let isDragging = false, offset = [0,0];
-    dragPanel.onmousedown = (e) => { isDragging = true; offset = [dragPanel.offsetLeft - e.clientX, dragPanel.offsetTop - e.clientY]; };
-    document.onmousemove = (e) => { if (isDragging) { dragPanel.style.left = (e.clientX + offset[0]) + 'px'; dragPanel.style.top = (e.clientY + offset[1]) + 'px'; } };
+    dragPanel.onmousedown = e => { isDragging = true; offset = [dragPanel.offsetLeft - e.clientX, dragPanel.offsetTop - e.clientY]; };
+    document.onmousemove = e => { if (isDragging) { dragPanel.style.left = (e.clientX + offset[0]) + 'px'; dragPanel.style.top = (e.clientY + offset[1]) + 'px'; } };
     document.onmouseup = () => { isDragging = false; };
 
+    // ── Индикатор статуса сети ──────────────────────────────────────────────
+    function setIndicator(state) { // 'ok' | 'err' | 'wait'
+        const el = document.getElementById('peer-indicator');
+        el.className = state === 'ok' ? 'ok' : state === 'err' ? 'err' : '';
+    }
+
+    // ── Инициализация PeerJS ────────────────────────────────────────────────
     function initNetworking() {
         const sid = Math.random().toString(36).substr(2, 4).toUpperCase();
-        peer = new Peer(sid, { host: '0.peerjs.com', port: 443, secure: true });
-        
-        peer.on('open', id => { 
-            document.getElementById('display-id').innerText = id; 
-            new QRCode(document.getElementById("qrcode"), { text: id, width: 60, height: 60 }); 
+        setIndicator('wait');
+
+        peer = new Peer(sid, {
+            host: '0.peerjs.com', port: 443, secure: true,
+            config: ICE_CONFIG,
+            debug: 0
         });
 
-        peer.on('connection', c => {
-            c.on('data', data => {
-                if(data.action === 'REGISTER') {
-                    const existingIdx = players.findIndex(p => p.connId === c.peer);
-                    const playerData = { name: data.name, score: 0, img: data.img || '', connId: c.peer };
-                    if(existingIdx === -1) players.push(playerData); else players[existingIdx] = playerData;
-                    buildScoreboard();
-                }
-                if(data.action === 'BUZZ') {
-                    const idx = players.findIndex(p => p.connId === c.peer);
-                    if(idx !== -1) triggerBuzzer(idx);
-                }
-            });
+        peer.on('open', id => {
+            document.getElementById('display-id').innerText = id;
+            document.getElementById('qrcode').innerHTML = '';
+            new QRCode(document.getElementById('qrcode'), { text: id, width: 60, height: 60 });
+            setIndicator('ok');
+        });
+
+        peer.on('connection', c => setupConnection(c));
+
+        peer.on('disconnected', () => {
+            setIndicator('err');
+            console.warn('PeerJS: disconnected, reconnecting...');
+            setTimeout(() => { try { peer.reconnect(); } catch(e) { initNetworking(); } }, 3000);
+        });
+
+        peer.on('error', err => {
+            setIndicator('err');
+            console.error('PeerJS error:', err.type, err);
+            // При критических ошибках — пересоздаём peer
+            if (['server-error','network','socket-error','socket-closed'].includes(err.type)) {
+                setTimeout(initNetworking, 5000);
+            }
         });
     }
 
+    // ── Настройка входящего соединения ──────────────────────────────────────
+    function setupConnection(c) {
+        connections[c.peer] = c;
+
+        c.on('open', () => { console.log('Player connected:', c.peer); });
+
+        c.on('data', data => {
+            if (data.action === 'REGISTER') {
+                const idx = players.findIndex(p => p.connId === c.peer);
+                const pd = { name: data.name, score: 0, img: data.img || '', connId: c.peer, online: true };
+                if (idx === -1) players.push(pd); else { players[idx] = pd; players[idx].score = players[idx].score || 0; }
+                buildScoreboard();
+            }
+            if (data.action === 'BUZZ') {
+                const idx = players.findIndex(p => p.connId === c.peer);
+                if (idx !== -1) triggerBuzzer(idx);
+            }
+        });
+
+        c.on('close', () => {
+            const idx = players.findIndex(p => p.connId === c.peer);
+            if (idx !== -1) { players[idx].online = false; buildScoreboard(); }
+            delete connections[c.peer];
+        });
+
+        c.on('error', err => {
+            console.error('Connection error with', c.peer, err);
+            const idx = players.findIndex(p => p.connId === c.peer);
+            if (idx !== -1) { players[idx].online = false; buildScoreboard(); }
+        });
+    }
+
+    // ── Звук зуммера ────────────────────────────────────────────────────────
     function playBuzzSound() {
         if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const now = audioCtx.currentTime;
-        const osc1 = audioCtx.createOscillator(); const gain1 = audioCtx.createGain();
-        osc1.type = 'sine'; osc1.frequency.setValueAtTime(330, now); osc1.frequency.exponentialRampToValueAtTime(660, now + 0.1);
-        gain1.gain.setValueAtTime(0.2, now); gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
-        osc1.connect(gain1); gain1.connect(audioCtx.destination);
-        const osc2 = audioCtx.createOscillator(); const gain2 = audioCtx.createGain();
-        osc2.type = 'triangle'; osc2.frequency.setValueAtTime(1320, now);
-        gain2.gain.setValueAtTime(0.1, now); gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
-        osc2.connect(gain2); gain2.connect(audioCtx.destination);
-        osc1.start(now); osc1.stop(now + 0.4); osc2.start(now); osc2.stop(now + 0.2);
+        [[330, 660, 'sine', 0.2, 0.4], [1320, 1320, 'triangle', 0.1, 0.2]].forEach(([f0,f1,type,vol,dur]) => {
+            const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+            osc.type = type; osc.frequency.setValueAtTime(f0, now); osc.frequency.exponentialRampToValueAtTime(f1, now + 0.1);
+            gain.gain.setValueAtTime(vol, now); gain.gain.exponentialRampToValueAtTime(0.01, now + dur);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(now); osc.stop(now + dur);
+        });
     }
 
     function triggerBuzzer(idx) {
-        if(currentAudio && !currentAudio.paused) {
+        if (currentAudio && !currentAudio.paused) {
             currentAudio.pause();
             clearInterval(r2Interval); clearInterval(r2PointsInterval);
             playBuzzSound();
-            document.querySelectorAll('.p-card').forEach((c, i) => { if(i === idx) c.classList.add('buzzed'); });
+            document.querySelectorAll('.p-card').forEach((c,i) => { if (i === idx) c.classList.add('buzzed'); });
         }
     }
 
     function resetBuzzer() { document.querySelectorAll('.p-card').forEach(c => c.classList.remove('buzzed')); }
     function toggleAdmin() { document.getElementById('admin-modal').classList.toggle('hidden'); }
 
+    // ── Генерация форм настройки ─────────────────────────────────────────────
     function genR1Setup() {
-        const rows = document.getElementById('r1-rows').value, cols = document.getElementById('r1-cols').value, area = document.getElementById('r1-setup-area'); 
+        const rows = document.getElementById('r1-rows').value, cols = document.getElementById('r1-cols').value, area = document.getElementById('r1-setup-area');
         area.innerHTML = '';
-        for(let i=0; i<rows; i++) {
-            let b = document.createElement('div'); b.className = 'r1-cat-block'; b.style.background = '#222'; b.style.padding = '20px'; b.style.borderRadius = '12px'; b.style.border = '1px solid #444';
+        for (let i = 0; i < rows; i++) {
+            let b = document.createElement('div'); b.className = 'r1-cat-block'; b.style.cssText = 'background:#222;padding:20px;border-radius:12px;border:1px solid #444;';
             b.innerHTML = `<strong>ТЕМА ${i+1}:</strong> <input type="text" class="r1-cat-name" placeholder="Название" style="width:300px; margin-bottom:15px;">`;
-            for(let j=0; j<cols; j++) b.innerHTML += `<div style="display:flex; gap:10px; margin-top:8px;"><input type="number" class="r1-val" value="${(j+1)*10}" style="width:60px;"><input type="file" class="r1-file" style="flex-grow:1;"><input type="text" class="r1-title" placeholder="Ответ" style="width:200px;"></div>`;
+            for (let j = 0; j < cols; j++) b.innerHTML += `<div style="display:flex;gap:10px;margin-top:8px;"><input type="number" class="r1-val" value="${(j+1)*10}" style="width:60px;"><input type="file" class="r1-file" style="flex-grow:1;"><input type="text" class="r1-title" placeholder="Ответ" style="width:200px;"></div>`;
             area.appendChild(b);
         }
     }
 
     function genR2Setup() {
-        const rows = document.getElementById('r2-rows').value, cols = document.getElementById('r2-cols').value, area = document.getElementById('r2-setup-area'); 
+        const rows = document.getElementById('r2-rows').value, cols = document.getElementById('r2-cols').value, area = document.getElementById('r2-setup-area');
         area.innerHTML = '';
-        for(let i=0; i<rows; i++) {
-            let b = document.createElement('div'); b.className = 'r2-cat-block'; b.style.background = '#222'; b.style.padding = '20px'; b.style.borderRadius = '12px'; b.style.border = '1px solid #444';
+        for (let i = 0; i < rows; i++) {
+            let b = document.createElement('div'); b.className = 'r2-cat-block'; b.style.cssText = 'background:#222;padding:20px;border-radius:12px;border:1px solid #444;';
             b.innerHTML = `<strong>ТЕМА ${i+1}:</strong> <input type="text" class="r2-cat-name" placeholder="Название" style="width:300px; margin-bottom:15px;">`;
-            for(let j=0; j<cols; j++) b.innerHTML += `<div style="display:flex; gap:10px; margin-top:8px;"><input type="file" class="r2-file" style="flex-grow:1;"><input type="text" class="r2-title" placeholder="Ответ" style="width:200px;"></div>`;
+            for (let j = 0; j < cols; j++) b.innerHTML += `<div style="display:flex;gap:10px;margin-top:8px;"><input type="file" class="r2-file" style="flex-grow:1;"><input type="text" class="r2-title" placeholder="Ответ" style="width:200px;"></div>`;
             area.appendChild(b);
         }
     }
 
     function genR3Setup() {
         const c = document.getElementById('r3-count').value, a = document.getElementById('r3-admin-playlist'); a.innerHTML = '';
-        for(let i=0; i<c; i++) a.innerHTML += `<div class="r3-admin-item" style="border-bottom:1px solid #333; padding:15px 0;"><div style="display:flex; gap:10px;"><strong>№${i+1}</strong> <input type="file" class="r3-file-in" style="flex-grow:1;"> <input type="text" class="r3-title-in" placeholder="Ответ" style="width:250px;"></div><textarea class="r3-hint-in" placeholder="Текст подсказки..."></textarea></div>`;
+        for (let i = 0; i < c; i++) a.innerHTML += `<div class="r3-admin-item" style="border-bottom:1px solid #333;padding:15px 0;"><div style="display:flex;gap:10px;"><strong>№${i+1}</strong> <input type="file" class="r3-file-in" style="flex-grow:1;"> <input type="text" class="r3-title-in" placeholder="Ответ" style="width:250px;"></div><textarea class="r3-hint-in" placeholder="Текст подсказки..."></textarea></div>`;
     }
 
     function applyAllSettings() {
         const r3Items = document.querySelectorAll('.r3-admin-item');
-        r3Data = Array.from(r3Items).map(b => {
-            const f = b.querySelector('.r3-file-in').files[0];
-            return { file: f ? URL.createObjectURL(f) : null, title: b.querySelector('.r3-title-in').value || "Без названия", hint: b.querySelector('.r3-hint-in').value || "Без подсказки" };
-        });
+        r3Data = Array.from(r3Items).map(b => ({
+            file: b.querySelector('.r3-file-in').files[0] ? URL.createObjectURL(b.querySelector('.r3-file-in').files[0]) : null,
+            title: b.querySelector('.r3-title-in').value || 'Без названия',
+            hint: b.querySelector('.r3-hint-in').value || 'Без подсказки'
+        }));
 
-        const r1Cols = document.getElementById('r1-cols').value;
+        const r1Cols = +document.getElementById('r1-cols').value;
         r1Data = []; const c1 = document.querySelectorAll('.r1-cat-name'), f1 = document.querySelectorAll('.r1-file'), t1 = document.querySelectorAll('.r1-title'), v1 = document.querySelectorAll('.r1-val');
-        let idx1 = 0; c1.forEach(c => { let ns = []; for(let j=0; j<r1Cols; j++) { ns.push({ val: v1[idx1].value, file: f1[idx1].files[0] ? URL.createObjectURL(f1[idx1].files[0]) : null, title: t1[idx1].value }); idx1++; } r1Data.push({ name: c.value, notes: ns }); });
+        let idx1 = 0; c1.forEach(c => { let ns = []; for (let j = 0; j < r1Cols; j++) { ns.push({ val: v1[idx1].value, file: f1[idx1].files[0] ? URL.createObjectURL(f1[idx1].files[0]) : null, title: t1[idx1].value }); idx1++; } r1Data.push({ name: c.value, notes: ns }); });
 
-        const r2Cols = document.getElementById('r2-cols').value;
+        const r2Cols = +document.getElementById('r2-cols').value;
         r2Data = []; const c2 = document.querySelectorAll('.r2-cat-name'), f2 = document.querySelectorAll('.r2-file'), t2 = document.querySelectorAll('.r2-title');
-        let idx2 = 0; c2.forEach(c => { let ss = []; for(let j=0; j<r2Cols; j++) { ss.push({ file: f2[idx2].files[0] ? URL.createObjectURL(f2[idx2].files[0]) : null, title: t2[idx2].value }); idx2++; } r2Data.push({ name: c.value, songs: ss, progress: 0 }); });
+        let idx2 = 0; c2.forEach(c => { let ss = []; for (let j = 0; j < r2Cols; j++) { ss.push({ file: f2[idx2].files[0] ? URL.createObjectURL(f2[idx2].files[0]) : null, title: t2[idx2].value }); idx2++; } r2Data.push({ name: c.value, songs: ss, progress: 0 }); });
 
         buildR1(); buildR2(); buildScoreboard(); buildR3Menu();
-        if(r3Data.length > 0) selectR3Melody(0);
+        if (r3Data.length > 0) selectR3Melody(0);
         toggleAdmin();
     }
 
@@ -287,28 +359,29 @@
         const b = document.getElementById('scoreboard'); b.innerHTML = '';
         players.forEach((p, i) => {
             let av = p.img ? `<img src="${p.img}" class="p-avatar">` : placeholderSVG;
-            b.innerHTML += `<div class="p-card">
+            b.innerHTML += `<div class="p-card${p.online === false ? ' offline' : ''}">
+                <div class="conn-dot"></div>
                 <div class="p-avatar-wrap">${av}</div>
-                <div style="font-weight:bold; margin-bottom:5px; text-align:center; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.name}</div>
+                <div style="font-weight:bold;margin-bottom:5px;text-align:center;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}${p.online === false ? ' 📴' : ''}</div>
                 <div class="score-container"><input type="number" class="score-input" value="${p.score}" onchange="players[${i}].score=parseInt(this.value)"></div>
             </div>`;
         });
     }
 
     function buildR1() {
-        const g = document.getElementById('r1-grid'); g.innerHTML = ''; 
-        if(!r1Data[0]) return;
+        const g = document.getElementById('r1-grid'); g.innerHTML = '';
+        if (!r1Data[0]) return;
         const cols = r1Data[0].notes.length; g.style.gridTemplateColumns = `auto repeat(${cols}, 110px)`;
         r1Data.forEach(row => {
             let l = document.createElement('div'); l.className = 'cat-label'; l.innerText = row.name; g.appendChild(l);
             row.notes.forEach(n => {
                 let btn = document.createElement('div'); btn.className = 'note-btn'; btn.innerHTML = `<span class="note-icon">♫</span><span class="note-value">${n.val}</span>`;
                 btn.onclick = () => {
-                    if(btn.classList.contains('played')) return;
-                    if(!btn.classList.contains('active')) {
-                        if(currentAudio) currentAudio.pause(); resetBuzzer(); btn.classList.add('active');
-                        document.getElementById('r1-answer-box').innerText = "Играет...";
-                        if(n.file) { currentAudio = new Audio(n.file); currentAudio.play(); }
+                    if (btn.classList.contains('played')) return;
+                    if (!btn.classList.contains('active')) {
+                        if (currentAudio) currentAudio.pause(); resetBuzzer(); btn.classList.add('active');
+                        document.getElementById('r1-answer-box').innerText = 'Играет...';
+                        if (n.file) { currentAudio = new Audio(n.file); currentAudio.play(); }
                     } else { btn.classList.replace('active', 'played'); document.getElementById('r1-answer-box').innerText = n.title; }
                 };
                 g.appendChild(btn);
@@ -318,16 +391,16 @@
 
     function buildR2() {
         const c = document.getElementById('r2-categories'); c.innerHTML = '';
-        r2Data.forEach((cat) => {
-            let div = document.createElement('div'); div.className = 'cat-label'; div.style.cursor = "pointer"; div.innerHTML = `${cat.name} (${cat.songs.length - cat.progress})`;
-            if(cat.progress >= cat.songs.length) div.style.opacity = "0.2";
+        r2Data.forEach(cat => {
+            let div = document.createElement('div'); div.className = 'cat-label'; div.style.cursor = 'pointer'; div.innerHTML = `${cat.name} (${cat.songs.length - cat.progress})`;
+            if (cat.progress >= cat.songs.length) div.style.opacity = '0.2';
             div.onclick = () => {
-                if(cat.progress < cat.songs.length) {
+                if (cat.progress < cat.songs.length) {
                     const song = cat.songs[cat.progress]; cat.progress++;
-                    if(currentAudio) currentAudio.pause(); resetBuzzer();
-                    document.getElementById('r2-answer').innerText = song.title; document.getElementById('r2-answer').style.display='none';
+                    if (currentAudio) currentAudio.pause(); resetBuzzer();
+                    document.getElementById('r2-answer').innerText = song.title; document.getElementById('r2-answer').style.display = 'none';
                     document.getElementById('r2-active-display').classList.remove('hidden');
-                    if(song.file) { currentAudio = new Audio(song.file); currentAudio.play(); startR2Logic(); }
+                    if (song.file) { currentAudio = new Audio(song.file); currentAudio.play(); startR2Logic(); }
                     buildR2();
                 }
             };
@@ -337,16 +410,16 @@
 
     function startR2Logic() {
         let secs = 30, pts = 0; clearInterval(r2Interval); clearInterval(r2PointsInterval);
-        r2Interval = setInterval(() => { secs--; document.getElementById('r2-timer').innerText = secs; if(secs<=0) clearInterval(r2Interval); }, 1000);
-        r2PointsInterval = setInterval(() => { pts += 10; document.getElementById('r2-points').innerText = pts; if(pts>=300) clearInterval(r2PointsInterval); }, 1000);
+        r2Interval = setInterval(() => { secs--; document.getElementById('r2-timer').innerText = secs; if (secs <= 0) clearInterval(r2Interval); }, 1000);
+        r2PointsInterval = setInterval(() => { pts += 10; document.getElementById('r2-points').innerText = pts; if (pts >= 300) clearInterval(r2PointsInterval); }, 1000);
     }
-    function revealR2Title() { if(currentAudio) currentAudio.pause(); document.getElementById('r2-answer').style.display = 'block'; }
+    function revealR2Title() { if (currentAudio) currentAudio.pause(); document.getElementById('r2-answer').style.display = 'block'; }
 
     function buildR3Menu() {
         const area = document.getElementById('r3-admin-playlist'); area.innerHTML = '<h3>Список для финала:</h3>';
         r3Data.forEach((item, i) => {
-            let div = document.createElement('div'); div.className = "r3-list-item";
-            div.style.cursor="pointer"; div.style.padding="10px"; div.style.borderBottom="1px solid #333"; div.style.background = "#1a1a1a";
+            let div = document.createElement('div'); div.className = 'r3-list-item';
+            div.style.cssText = 'cursor:pointer;padding:10px;border-bottom:1px solid #333;background:#1a1a1a;';
             div.innerHTML = `<span>Мелодия №${i+1}: <strong>${item.title}</strong></span>`;
             div.onclick = () => selectR3Melody(i);
             area.appendChild(div);
@@ -355,55 +428,45 @@
 
     function selectR3Melody(i) {
         if (i < 0 || i >= r3Data.length) {
-             document.getElementById('r3-play-btn').style.opacity = "0.3";
-             document.getElementById('r3-hint-display').innerText = "Финал окончен!";
-             r3ActiveIdx = -1;
-             return;
+            document.getElementById('r3-play-btn').style.opacity = '0.3';
+            document.getElementById('r3-hint-display').innerText = 'Финал окончен!';
+            r3ActiveIdx = -1; return;
         }
-        r3ActiveIdx = i;
-        r3Bid = 7; document.getElementById('r3-bid').innerText = 7;
+        r3ActiveIdx = i; r3Bid = 7; document.getElementById('r3-bid').innerText = 7;
         document.getElementById('r3-hint-display').innerText = r3Data[i].hint;
         document.getElementById('r3-answer').style.display = 'none';
-        document.getElementById('r3-play-btn').style.opacity = "1";
-        document.querySelectorAll('.r3-list-item').forEach((el, idx) => { el.style.background = (idx === i) ? "#444" : "#1a1a1a"; });
+        document.getElementById('r3-play-btn').style.opacity = '1';
+        document.querySelectorAll('.r3-list-item').forEach((el, idx) => { el.style.background = idx === i ? '#444' : '#1a1a1a'; });
     }
 
     function changeR3Bid(v) { r3Bid = Math.max(1, r3Bid + v); document.getElementById('r3-bid').innerText = r3Bid; }
-    
+
     function playR3Song() {
-        if(r3ActiveIdx === -1) return;
-        const song = r3Data[r3ActiveIdx];
-        if(!song.file) return;
-        if(currentAudio) currentAudio.pause();
-        resetBuzzer();
-        currentAudio = new Audio(song.file);
-        currentAudio.play();
-        setTimeout(() => { if(currentAudio) currentAudio.pause(); }, r3Bid * 1000);
+        if (r3ActiveIdx === -1) return;
+        const song = r3Data[r3ActiveIdx]; if (!song.file) return;
+        if (currentAudio) currentAudio.pause(); resetBuzzer();
+        currentAudio = new Audio(song.file); currentAudio.play();
+        setTimeout(() => { if (currentAudio) currentAudio.pause(); }, r3Bid * 1000);
     }
 
     function revealR3Title() {
-        if(currentAudio) currentAudio.pause();
-        if(r3ActiveIdx !== -1) {
+        if (currentAudio) currentAudio.pause();
+        if (r3ActiveIdx !== -1) {
             document.getElementById('r3-answer').innerText = r3Data[r3ActiveIdx].title;
             document.getElementById('r3-answer').style.display = 'block';
-            
-            // Исправление: Автоматически готовим следующую мелодию через 2 секунды
-            setTimeout(() => {
-                selectR3Melody(r3ActiveIdx + 1);
-                buildR3Menu(); // Обновить выделение в админке
-            }, 2000);
+            setTimeout(() => { selectR3Melody(r3ActiveIdx + 1); buildR3Menu(); }, 2000);
         }
     }
 
     function switchRound(r) {
-        if(currentAudio) currentAudio.pause();
-        document.getElementById('r1-ui').classList.toggle('hidden', r!==1);
-        document.getElementById('r2-ui').classList.toggle('hidden', r!==2);
-        document.getElementById('r3-ui').classList.toggle('hidden', r!==3);
-        [1,2,3].forEach(i => document.getElementById('nav-'+i).classList.toggle('active-nav', r===i));
+        if (currentAudio) currentAudio.pause();
+        document.getElementById('r1-ui').classList.toggle('hidden', r !== 1);
+        document.getElementById('r2-ui').classList.toggle('hidden', r !== 2);
+        document.getElementById('r3-ui').classList.toggle('hidden', r !== 3);
+        [1,2,3].forEach(i => document.getElementById('nav-'+i).classList.toggle('active-nav', r === i));
     }
 
-    function fullReset() { if(confirm("Сбросить игру?")) location.reload(); }
+    function fullReset() { if (confirm('Сбросить игру?')) location.reload(); }
 
     genR1Setup(); genR2Setup(); genR3Setup(); initNetworking();
 </script>
